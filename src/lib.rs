@@ -6,11 +6,8 @@
 #![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-// for handle_alloc_error
-extern crate alloc;
-
 use core::{
-    alloc::{Allocator, Layout},
+    alloc::{AllocError, Allocator, Layout},
     ptr::{self, NonNull},
     sync::atomic::{self, AtomicUsize, Ordering},
 };
@@ -31,7 +28,10 @@ pub struct Polymorphic<'alloc> {
 
 impl<'alloc> Polymorphic<'alloc> {
     /// Constructs a new `Polymorphic` wrapping the given allocator. The allocator must be thread-safe.
-    pub fn new<A>(alloc: A) -> Self
+    ///
+    /// # Errors
+    /// This function returns an error if storage for the allocator cannot be allocated.
+    pub fn try_new<A>(alloc: A) -> Result<Self, A>
     where
         A: Allocator + Send + Sync + 'alloc,
     {
@@ -60,7 +60,7 @@ impl<'alloc> Polymorphic<'alloc> {
 
         let layout = Layout::new::<PolymorphicInner<A>>();
         let Ok(storage) = alloc.allocate(layout) else {
-            ::alloc::alloc::handle_alloc_error(layout)
+            return Err(alloc);
         };
         let storage = storage.cast::<PolymorphicInner<A>>();
         // SAFETY: we store the allocator inside its own ref-counted allocation, satisfying the type invariants
@@ -70,11 +70,24 @@ impl<'alloc> Polymorphic<'alloc> {
                 dtor: drop_alloc::<A>,
                 alloc,
             });
-            Self { value: storage }
+            Ok(Self { value: storage })
         }
     }
 
-    fn inner(&self) -> &PolymorphicInner<dyn Allocator + 'alloc> {
+    /// Constructs a new `Polymorphic` wrapping the given allocator. The allocator must be thread-safe.
+    pub fn new<A>(alloc: A) -> Self
+    where
+        A: Allocator + Send + Sync + 'alloc,
+    {
+        extern crate alloc;
+        Self::try_new(alloc).unwrap_or_else(|_| {
+            alloc::alloc::handle_alloc_error(Layout::new::<PolymorphicInner<A>>())
+        })
+    }
+
+    /// Returns the underlying managed allocation.
+    fn inner(&self) -> &PolymorphicInner<dyn Allocator + Send + Sync + 'alloc> {
+        // SAFETY: `self` exists so the value is ok for shared access
         unsafe { self.value.as_ref() }
     }
 }
@@ -85,7 +98,13 @@ unsafe impl Sync for Polymorphic<'_> {}
 
 impl Clone for Polymorphic<'_> {
     fn clone(&self) -> Self {
-        self.inner().ref_count.fetch_add(1, Ordering::Relaxed);
+        let prev_count = self.inner().ref_count.fetch_add(1, Ordering::Relaxed);
+        if prev_count > usize::MAX / 2 {
+            // Abort by causing a double panic if the ref count gets too high.
+            // See std::sync::Arc for why this is necessary.
+            scopeguard::defer! { panic!() }
+            panic!()
+        }
         Self { value: self.value }
     }
 }
@@ -93,6 +112,7 @@ impl Clone for Polymorphic<'_> {
 impl Drop for Polymorphic<'_> {
     fn drop(&mut self) {
         let dtor = self.inner().dtor;
+        // SAFETY: this is the dtor created in `try_new`, which expects the allocation.
         unsafe {
             dtor(self.value.as_ptr().cast());
         }
@@ -101,7 +121,7 @@ impl Drop for Polymorphic<'_> {
 
 // SAFETY: we forward all functionality to the allocator we wrap. All clones of `self` use the same allocator.
 unsafe impl Allocator for Polymorphic<'_> {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.inner().alloc.allocate(layout)
     }
 
@@ -109,7 +129,7 @@ unsafe impl Allocator for Polymorphic<'_> {
         unsafe { self.inner().alloc.deallocate(ptr, layout) }
     }
 
-    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.inner().alloc.allocate_zeroed(layout)
     }
 
@@ -118,7 +138,7 @@ unsafe impl Allocator for Polymorphic<'_> {
         ptr: NonNull<u8>,
         old_layout: Layout,
         new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+    ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe { self.inner().alloc.grow(ptr, old_layout, new_layout) }
     }
 
@@ -127,7 +147,7 @@ unsafe impl Allocator for Polymorphic<'_> {
         ptr: NonNull<u8>,
         old_layout: Layout,
         new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+    ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe { self.inner().alloc.grow_zeroed(ptr, old_layout, new_layout) }
     }
 
@@ -136,7 +156,7 @@ unsafe impl Allocator for Polymorphic<'_> {
         ptr: NonNull<u8>,
         old_layout: Layout,
         new_layout: Layout,
-    ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
+    ) -> Result<NonNull<[u8]>, AllocError> {
         unsafe { self.inner().alloc.shrink(ptr, old_layout, new_layout) }
     }
 }
