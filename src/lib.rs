@@ -18,6 +18,7 @@ struct PolymorphicInner<A: Allocator + ?Sized> {
     alloc: A,
 }
 
+/// An allocator that can wrap any (`Sized`) allocator. See the crate documentation for details.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Polymorphic<'alloc> {
     /// The allocator being wrapped, reference-counted. Safety invariant: this pointer is valid, and the allocator
