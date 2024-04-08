@@ -1,3 +1,2 @@
-Defines a polymorphic allocator type. This crate provides the type `Polymorphic<'alloc>`, a uniform representation
-for an allocator of any type, like `dyn Allocator + 'alloc`, but which can be freely cloned and stored. Under the hood,
-the backing allocator is stored in a reference-counted allocation.
+Defines a polymorphic allocator type. This crate provides the type `Polymorphic<'alloc>`, which can wrap an allocator
+of any `Sized` type. This type is akin to `dyn Allocator + 'alloc`, but without requiring external storage.
