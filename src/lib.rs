@@ -8,6 +8,7 @@
 
 use core::{
     alloc::{AllocError, Allocator, Layout},
+    mem::ManuallyDrop,
     ptr::{self, NonNull},
     sync::atomic::{self, AtomicUsize, Ordering},
 };
@@ -84,6 +85,14 @@ impl<'alloc> Polymorphic<'alloc> {
         Self::try_new(alloc).unwrap_or_else(|_| {
             alloc::alloc::handle_alloc_error(Layout::new::<PolymorphicInner<A>>())
         })
+    }
+
+    /// Leak this allocator's storage and get a pointer to the internal allocator.
+    pub fn leak(self) -> &'alloc (dyn Allocator + Send + Sync) {
+        let this = ManuallyDrop::new(self);
+        // SAFEY: `self` exists so the value is ok for shared access.
+        // `self` is also leaked, ensuring that the allocation will always be valid
+        unsafe { &this.value.as_ref().alloc }
     }
 
     /// Returns the underlying managed allocation.
